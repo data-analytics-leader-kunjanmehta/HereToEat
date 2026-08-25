@@ -1,62 +1,74 @@
-# HeretoEat — Local App (Live Google Data)
+# HeretoEat — Local App (Live Google Data + GenAI + Agentic AI)
 
-Runs on your laptop. Pulls real restaurant data from Google Places API
-(New) once your key is set up — falls back automatically to a small local
-sample dataset if no key is found, so it never just breaks.
+Runs on your laptop or Colab. Pulls real restaurant data from Google Places
+API, understands free-text requests via Claude (GenAI), and adaptively
+refines its own search when results fall short (Agentic AI). Falls back
+automatically to a small local sample dataset if the Google key is
+missing, so it never just breaks.
 
-## 1. Google Cloud setup (one-time, ~10 minutes)
+## What's new: GenAI + Agentic AI
 
-Follow these in your browser (console.cloud.google.com):
+- **GenAI — free-text understanding** (`llm_agent.extract_context_from_text`):
+  type what you want in plain language instead of using dropdowns; Claude
+  converts it into the same structured context the app already used.
+- **Agentic AI — adaptive search-refinement** (`llm_agent.agentic_search`):
+  a Reason → Act → Observe loop. If the first search comes back with too
+  few usable results, the agent decides how to adjust (broaden cuisine,
+  drop a filter, rephrase) and retries — up to 3 attempts — instead of
+  just returning "no matches." Every step is shown in an "Agent Reasoning"
+  panel in the UI.
 
-1. Create/open a Google Cloud project.
-2. Enable billing (required by Google even for free-tier use — nothing is
-   charged just from this step).
-3. Enable **Places API (New)** under APIs & Services → Library.
-4. Create an API key under APIs & Services → Credentials, then click
-   **Restrict key** and limit it to Places API (New) only.
-5. Set a **hard quota cap** under Places API (New) → Quotas & System Limits
-   (e.g. 100 requests/day). This is what makes it genuinely zero-cost —
-   once hit, Google errors out instead of billing you.
-6. (Optional) Set a ₹1 budget alert under Billing → Budgets & Alerts as a
-   second tripwire.
+Both features are additive — the original dropdown-based flow still works
+exactly as before, with or without an Anthropic key.
 
-## 2. Add your key
+## 1. Google Cloud setup (one-time)
+
+See the earlier setup notes — Places API (New) enabled, key restricted,
+quota capped. Unchanged from before.
+
+## 2. Anthropic (Claude) API setup (new)
+
+1. Go to console.anthropic.com and sign in / create an account.
+2. Go to Settings → API Keys → Create Key. Copy it.
+3. This is a separate billing relationship from Google — usage for this
+   app (short extraction + refinement calls) is very cheap, but there's
+   no free-tier quota cap like Google's, so keep an eye on usage under
+   Settings → Usage if you're cost-conscious.
+
+## 3. Add your keys
 
 ```bash
-cd rf_app
+cd heretoeat_app
 cp .env.example .env
 ```
 
-Open `.env` and paste your real key in place of `your_key_here`. `.env` is
-already in `.gitignore` — it will never get committed or shared.
+Open `.env` and paste both real keys in. `.env` is already in
+`.gitignore` — it will never get committed or shared.
 
-## 3. Run it
+**Running in Colab instead?** Don't put the key in a file — use a Colab
+Secret (🔑 icon in the sidebar) named `ANTHROPIC_API_KEY`, same pattern as
+`GOOGLE_PLACES_API_KEY`, then write both into `.env` inside the session
+exactly like before.
+
+## 4. Run it
 
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Opens at `http://localhost:8501`. If `.env` has a valid key, you'll see
-"Live mode" at the top and results come from real, current Google data.
-If something's off with the key, the app tells you and automatically falls
-back to the local sample dataset rather than crashing.
-
-## Important: this is your first real test of the live call
-
-This app was built and unit-tested against a *simulated* Google response —
-the sandbox used to write it can't reach Google's servers directly. Your
-laptop can. The first time you click "Find restaurants" in live mode is
-the actual first real test of the API call. If it errors, the message
-shown will tell you what's wrong (bad key, API not enabled, quota hit,
-etc.) — paste that error back and it's a quick fix.
+Opens at `http://localhost:8501`. Type a request in plain language and
+click "Let AI figure it out" to use the GenAI + Agentic flow, or scroll
+down and use the dropdowns for the original rule-based flow — both work
+independently.
 
 ## What's inside
 
 ```
-rf_app/
-├─ app.py                       # UI + reasoning, all in one process
+heretoeat_app/
+├─ app.py                       # UI + both flows, all in one process
 ├─ google_places.py             # Layer 1 (Data) — live Google Places call
+├─ llm_agent.py                 # GenAI (extraction) + Agentic AI (refinement)
 ├─ data/sample_restaurants.json # local fallback dataset
 ├─ requirements.txt
 ├─ .env.example
@@ -64,13 +76,17 @@ rf_app/
 └─ README.md
 ```
 
-`app.py` keeps the same four layers as before — only Layer 1 (Data) changed
-to call `google_places.search_restaurants()` instead of reading the local
-JSON file. Layers 2–4 (context, reasoning, presentation) are untouched.
+`llm_agent.py` plugs into the *existing* Layer 2 (Context) and Layer 3
+(Reasoning) seams — `build_context()` and `rank_restaurants()` in `app.py`
+are completely unchanged. The GenAI step only changes how the context gets
+filled in; the agentic loop only changes what gets searched for. Layer 4
+(Presentation) gained one new panel (Agent Reasoning) but nothing else
+about it changed either.
 
-## Next: sharing it with others
+## Important: first real test, same as before
 
-Not today's problem — this still runs locally, on your machine only.
-Once it's working the way you want, the next step is deploying the same
-app to free hosting (e.g. Streamlit Community Cloud) to get a shareable
-link, with your key stored as a hosting "secret" instead of a local `.env`.
+Both `llm_agent.py` functions were built and unit-tested against
+*simulated* Claude responses — this sandbox can't reach `api.anthropic.com`
+directly. Your first real click of "Let AI figure it out" is the actual
+first live test. If it errors, the message shown will say what's wrong —
+paste it back for a quick fix.

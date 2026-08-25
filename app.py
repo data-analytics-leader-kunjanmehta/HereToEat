@@ -22,8 +22,9 @@ import streamlit as st
 from dotenv import load_dotenv
 
 import google_places
+import llm_agent
 
-load_dotenv()  # reads .env for GOOGLE_PLACES_API_KEY
+load_dotenv()  # reads .env for GOOGLE_PLACES_API_KEY and ANTHROPIC_API_KEY
 
 DATA_PATH = Path(__file__).parent / "data" / "sample_restaurants.json"
 
@@ -159,6 +160,13 @@ def render_result_card(r: dict, rank: int):
                 st.markdown(f"- {reason}")
 
 
+def render_agent_trace(trace: list[str]):
+    with st.container(border=True):
+        st.markdown("**\U0001F916 Agent Reasoning**")
+        for i, step in enumerate(trace, start=1):
+            st.markdown(f"{i}. {step}")
+
+
 COMMON_CUISINES = ["North Indian", "South Indian", "Chinese", "Italian", "Continental",
                     "Cafe", "Thai", "Japanese", "Andhra", "Biryani", "Desserts", "Fast Food"]
 
@@ -168,6 +176,7 @@ def main():
     st.title("\U0001F37D\uFE0F HeretoEat")
 
     api_key_present = bool(os.environ.get("GOOGLE_PLACES_API_KEY"))
+    llm_key_present = bool(os.environ.get("ANTHROPIC_API_KEY"))
     if api_key_present:
         st.caption("Live mode \u2014 pulling real results from Google Places.")
         data_mode = "live"
@@ -179,7 +188,54 @@ def main():
         )
         data_mode = "local"
 
-    st.markdown("##### Tell it what you're looking for")
+    # -----------------------------------------------------------------
+    # GenAI + Agentic entry point: describe it in your own words
+    # -----------------------------------------------------------------
+    st.markdown("##### Or just describe what you're looking for")
+    free_text = st.text_area(
+        "Free text",
+        placeholder="e.g. \"Somewhere quiet in Indiranagar for a work call over coffee\"",
+        label_visibility="collapsed",
+    )
+    ask_ai_clicked = st.button("\U0001F916 Let AI figure it out", type="primary", disabled=not llm_key_present)
+    if not llm_key_present:
+        st.caption("Needs ANTHROPIC_API_KEY in .env to enable this \u2014 the dropdowns below still work without it.")
+
+    if ask_ai_clicked and free_text.strip():
+        with st.spinner("Reading your request..."):
+            try:
+                parsed = llm_agent.extract_context_from_text(free_text)
+            except Exception as e:
+                st.error(f"Couldn't understand that with AI: {e}\n\nTry the dropdowns below instead.")
+                parsed = None
+
+        if parsed:
+            with st.expander("What the AI understood from your text", expanded=True):
+                st.json(parsed)
+
+            area = parsed.get("area") or "Bangalore"
+            cuisine_pref = parsed.get("cuisine_pref") or []
+            ctx = build_context(
+                parsed.get("mood", "Any"), parsed.get("occasion", "Any"), parsed.get("group", "Any"),
+                cuisine_pref, parsed.get("max_price", 3), parsed.get("open_now_only", False),
+            )
+
+            with st.spinner("Searching and refining..."):
+                results, trace = llm_agent.agentic_search(area, cuisine_pref, ctx, rank_restaurants)
+
+            st.markdown("---")
+            render_agent_trace(trace)
+            st.markdown("---")
+            if not results:
+                st.warning("The agent couldn't find a good match even after refining \u2014 try the dropdowns below.")
+            else:
+                st.markdown(f"##### Top {min(5, len(results))} matches")
+                for i, r in enumerate(results[:5], start=1):
+                    render_result_card(r, i)
+            return  # don't also render the manual flow below on this run
+
+    st.markdown("---")
+    st.markdown("##### Or use the filters directly")
 
     if data_mode == "live":
         area = st.text_input("Area / neighborhood", value="Bangalore")

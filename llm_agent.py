@@ -89,7 +89,7 @@ def extract_context_from_text(free_text: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# AGENTIC AI USE CASE: adaptive search-refinement
+# AGENTIC AI USE CASE: adaptive search-refinement + LLM-based re-ranking
 # ---------------------------------------------------------------------------
 REFINE_SYSTEM = """You are refining a restaurant search that returned too few usable results.
 Given the original search query, the area, and why it fell short, decide ONE concrete
@@ -97,6 +97,17 @@ change to make and write a new search query text.
 
 Return ONLY valid JSON, no other text, no markdown fences:
 {"change": "one short sentence describing what you're relaxing and why", "new_query": "the new search text to run"}"""
+
+RERANK_SYSTEM = """You are ranking real restaurant candidates for a specific person's request.
+You'll get their mood/occasion/group, and a numbered list of candidates with whatever real
+data is available (name, cuisine, type, description, rating). Restaurant data comes from
+Google and does NOT include a "mood" field - you must judge fit yourself from the name,
+description, and type, the way a person would.
+
+Return ONLY valid JSON, no other text, no markdown fences: an array covering EVERY input
+candidate, ordered best-fit first, each item:
+{"index": <int, the 0-based index from the input list>, "reason": "one short specific sentence on why this does or doesn't fit well, in your own words"}
+Do not invent restaurants that aren't in the input list. Include all of them, just reordered."""
 
 
 def _decide_refinement(query: str, area: str, reason: str) -> dict:
@@ -110,25 +121,88 @@ def _decide_refinement(query: str, area: str, reason: str) -> dict:
     return _parse_json_response(resp.content[0].text)
 
 
-def agentic_search(area: str, cuisine_pref: list[str], ctx: dict, rank_fn, max_attempts: int = 3):
-    """
-    Reason -> Act -> Observe loop over Google Places + the existing ranking layer.
+def _hard_filter(restaurants: list[dict], ctx: dict) -> list[dict]:
+    """Objective filters only (budget, open-now) - no tag-matching here at all,
+    since live Google data has no tags to match. This is intentionally dumb."""
+    out = []
+    for r in restaurants:
+        if ctx.get("open_now_only") and not r["open_now"]:
+            continue
+        if r["price_level"] > ctx.get("max_price", 3):
+            continue
+        out.append(r)
+    return out
 
-    area, cuisine_pref: used to build the first search query.
-    ctx: the context dict from build_context() - scored against by rank_fn.
-    rank_fn: pass app.py's rank_restaurants directly - keeps Layer 3's scoring
-             logic completely untouched; the agent only decides WHAT to search,
-             never how results get scored once they're in hand.
+
+def llm_rerank(restaurants: list[dict], mood: str, occasion: str, group: str) -> list[dict]:
+    """
+    The actual fix for live-data mood matching: ask an LLM to judge fit from
+    real restaurant text (name/description/type), since there's no mood_tags
+    field to pattern-match against on live Google results.
+    """
+    if not restaurants:
+        return []
+
+    client = _client()
+    listing = "\n".join(
+        f"{i}. {r['name']} \u2014 {', '.join(r['cuisine'])} \u2014 {r['restaurant_type']} \u2014 "
+        f"{r['description'] or 'no description available'} \u2014 rated {r['rating']}\u2605"
+        for i, r in enumerate(restaurants)
+    )
+    user_msg = f"Mood: {mood}\nOccasion: {occasion}\nGroup: {group}\n\nCandidates:\n{listing}"
+
+    resp = client.messages.create(
+        model=MODEL,
+        max_tokens=1000,
+        system=RERANK_SYSTEM,
+        messages=[{"role": "user", "content": user_msg}],
+    )
+    ranking = _parse_json_response(resp.content[0].text)
+
+    reordered = []
+    for item in ranking:
+        idx = item.get("index")
+        if idx is not None and 0 <= idx < len(restaurants):
+            r = dict(restaurants[idx])
+            r["_reasons"] = [item.get("reason", "")]
+            reordered.append(r)
+
+    # Safety net: if the model dropped any candidates, tack them on unranked
+    # rather than silently losing them.
+    seen = {r["name"] for r in reordered}
+    for r in restaurants:
+        if r["name"] not in seen:
+            r2 = dict(r)
+            r2["_reasons"] = ["Not explicitly ranked by the AI \u2014 included for completeness"]
+            reordered.append(r2)
+    return reordered
+
+
+def agentic_search(area: str, cuisine_pref: list[str], ctx: dict,
+                    mood: str = "Any", occasion: str = "Any", group: str = "Any",
+                    max_attempts: int = 3):
+    """
+    Reason -> Act -> Observe loop over Google Places, followed by LLM re-ranking.
+
+    Step A (Act):      search Google with a query that now includes mood/occasion.
+    Step B (Observe):  apply objective hard filters only (budget, open-now).
+    Step C (Reason):   if too few survive, ask the LLM how to adjust and retry.
+    Step D (Reason):   once enough candidates exist, ask the LLM to judge and
+                        rank them by genuine fit - this is what replaces the
+                        old empty-tag scoring for live data.
+
     Returns (results, trace) - trace is a list of plain-English steps for the
     "Agent Reasoning" panel in the UI.
     """
     trace = []
     local_ctx = dict(ctx)
     cuisine_str = f"{' '.join(cuisine_pref)} " if cuisine_pref else ""
-    query = f"{cuisine_str}restaurants near {area}".strip()
+    mood_str = f"{mood} " if mood and mood != "Any" else ""
+    occasion_str = f" for {occasion}" if occasion and occasion != "Any" else ""
+    query = f"{mood_str}{cuisine_str}restaurants near {area}{occasion_str}".strip()
     trace.append(f'Searching Google Places for: "{query}"')
 
-    results = []
+    filtered = []
     for attempt in range(1, max_attempts + 1):
         try:
             restaurants = google_places.search_restaurants(query_text=query)
@@ -136,18 +210,12 @@ def agentic_search(area: str, cuisine_pref: list[str], ctx: dict, rank_fn, max_a
             trace.append(f"Search failed: {e}")
             return [], trace
 
-        results = rank_fn(restaurants, local_ctx)
-        trace.append(f"Attempt {attempt}: {len(restaurants)} raw results \u2192 {len(results)} passed filters")
+        filtered = _hard_filter(restaurants, local_ctx)
+        trace.append(f"Attempt {attempt}: {len(restaurants)} raw results \u2192 {len(filtered)} passed budget/open-now filters")
 
-        if len(results) >= 3:
-            trace.append("Enough good matches found \u2014 stopping here")
-            return results, trace
+        if len(filtered) >= 3 or attempt == max_attempts:
+            break
 
-        if attempt == max_attempts:
-            trace.append("Reached max attempts \u2014 returning best available")
-            return results, trace
-
-        # Not enough usable results yet - let the agent decide how to adjust.
         reason = (
             "Too few results passed budget/open-now filters"
             if local_ctx.get("open_now_only") or local_ctx.get("max_price", 3) < 3
@@ -161,4 +229,18 @@ def agentic_search(area: str, cuisine_pref: list[str], ctx: dict, rank_fn, max_a
             trace.append(f"Refinement call failed ({e}) \u2014 relaxing open-now filter as a fallback")
             local_ctx["open_now_only"] = False
 
-    return results, trace
+    if not filtered:
+        trace.append("No candidates left after filtering \u2014 nothing to rank")
+        return [], trace
+
+    trace.append(f"Asking the LLM to judge {len(filtered)} candidates for genuine mood/occasion fit")
+    try:
+        ranked = llm_rerank(filtered, mood, occasion, group)
+        trace.append("LLM ranking complete")
+    except Exception as e:
+        trace.append(f"LLM ranking failed ({e}) \u2014 falling back to rating-sorted order")
+        ranked = sorted(filtered, key=lambda r: r["rating"], reverse=True)
+        for r in ranked:
+            r["_reasons"] = [f"Rated {r['rating']}\u2605 (fallback sort \u2014 LLM ranking unavailable)"]
+
+    return ranked, trace

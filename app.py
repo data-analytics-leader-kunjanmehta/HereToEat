@@ -221,7 +221,12 @@ def main():
             )
 
             with st.spinner("Searching and refining..."):
-                results, trace = llm_agent.agentic_search(area, cuisine_pref, ctx, rank_restaurants)
+                results, trace = llm_agent.agentic_search(
+                    area, cuisine_pref, ctx,
+                    mood=parsed.get("mood", "Any"),
+                    occasion=parsed.get("occasion", "Any"),
+                    group=parsed.get("group", "Any"),
+                )
 
             st.markdown("---")
             render_agent_trace(trace)

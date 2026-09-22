@@ -226,6 +226,7 @@ def main():
                     mood=parsed.get("mood", "Any"),
                     occasion=parsed.get("occasion", "Any"),
                     group=parsed.get("group", "Any"),
+                    keywords=parsed.get("keywords", []),
                 )
 
             st.markdown("---")

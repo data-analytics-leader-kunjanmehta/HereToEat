@@ -68,7 +68,9 @@ Return ONLY valid JSON, no other text, no markdown fences, matching exactly this
   "cuisine_pref": array of cuisine name strings explicitly or clearly implied, else [],
   "max_price": integer 1-3 (1=budget conscious, 3=no limit mentioned), default 3 if not mentioned,
   "open_now_only": boolean, true only if urgency is implied ("right now","tonight","currently open"), else false,
-  "area": area/neighborhood mentioned as plain text, else null
+  "area": area/neighborhood mentioned as plain text, else null,
+  "keywords": array of SPECIFIC requirements or amenities mentioned that don't fit the fields above \
+(e.g. "big screen tv", "live sports", "outdoor seating", "pet friendly", "rooftop", "parking"), else []
 }"""
 
 
@@ -134,11 +136,13 @@ def _hard_filter(restaurants: list[dict], ctx: dict) -> list[dict]:
     return out
 
 
-def llm_rerank(restaurants: list[dict], mood: str, occasion: str, group: str) -> list[dict]:
+def llm_rerank(restaurants: list[dict], mood: str, occasion: str, group: str, keywords: list[str] = None) -> list[dict]:
     """
     The actual fix for live-data mood matching: ask an LLM to judge fit from
     real restaurant text (name/description/type), since there's no mood_tags
-    field to pattern-match against on live Google results.
+    field to pattern-match against on live Google results. keywords carries
+    anything specific the person asked for that didn't fit mood/occasion/group
+    (e.g. "big screen tv", "live sports") so the model can weigh it explicitly.
     """
     if not restaurants:
         return []
@@ -149,7 +153,8 @@ def llm_rerank(restaurants: list[dict], mood: str, occasion: str, group: str) ->
         f"{r['description'] or 'no description available'} \u2014 rated {r['rating']}\u2605"
         for i, r in enumerate(restaurants)
     )
-    user_msg = f"Mood: {mood}\nOccasion: {occasion}\nGroup: {group}\n\nCandidates:\n{listing}"
+    keywords_line = f"Specific requirements: {', '.join(keywords)}\n" if keywords else ""
+    user_msg = f"Mood: {mood}\nOccasion: {occasion}\nGroup: {group}\n{keywords_line}\nCandidates:\n{listing}"
 
     resp = client.messages.create(
         model=MODEL,
@@ -180,26 +185,31 @@ def llm_rerank(restaurants: list[dict], mood: str, occasion: str, group: str) ->
 
 def agentic_search(area: str, cuisine_pref: list[str], ctx: dict,
                     mood: str = "Any", occasion: str = "Any", group: str = "Any",
-                    max_attempts: int = 3):
+                    keywords: list[str] = None, max_attempts: int = 3):
     """
     Reason -> Act -> Observe loop over Google Places, followed by LLM re-ranking.
 
-    Step A (Act):      search Google with a query that now includes mood/occasion.
+    Step A (Act):      search Google with a query that includes mood/occasion
+                        AND keywords (e.g. "big screen tv", "live sports") -
+                        anything specific the person asked for that doesn't
+                        fit the structured fields still reaches the search.
     Step B (Observe):  apply objective hard filters only (budget, open-now).
     Step C (Reason):   if too few survive, ask the LLM how to adjust and retry.
     Step D (Reason):   once enough candidates exist, ask the LLM to judge and
-                        rank them by genuine fit - this is what replaces the
-                        old empty-tag scoring for live data.
+                        rank them by genuine fit, keywords included - this is
+                        what replaces the old empty-tag scoring for live data.
 
     Returns (results, trace) - trace is a list of plain-English steps for the
     "Agent Reasoning" panel in the UI.
     """
     trace = []
     local_ctx = dict(ctx)
+    keywords = keywords or []
     cuisine_str = f"{' '.join(cuisine_pref)} " if cuisine_pref else ""
     mood_str = f"{mood} " if mood and mood != "Any" else ""
     occasion_str = f" for {occasion}" if occasion and occasion != "Any" else ""
-    query = f"{mood_str}{cuisine_str}restaurants near {area}{occasion_str}".strip()
+    keywords_str = f" with {', '.join(keywords)}" if keywords else ""
+    query = f"{mood_str}{cuisine_str}restaurants near {area}{occasion_str}{keywords_str}".strip()
     trace.append(f'Searching Google Places for: "{query}"')
 
     filtered = []
@@ -235,7 +245,7 @@ def agentic_search(area: str, cuisine_pref: list[str], ctx: dict,
 
     trace.append(f"Asking the LLM to judge {len(filtered)} candidates for genuine mood/occasion fit")
     try:
-        ranked = llm_rerank(filtered, mood, occasion, group)
+        ranked = llm_rerank(filtered, mood, occasion, group, keywords)
         trace.append("LLM ranking complete")
     except Exception as e:
         trace.append(f"LLM ranking failed ({e}) \u2014 falling back to rating-sorted order")

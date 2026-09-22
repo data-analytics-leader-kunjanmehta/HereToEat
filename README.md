@@ -18,8 +18,8 @@ missing, so it never just breaks.
   just returning "no matches." Every step is shown in an "Agent Reasoning"
   panel in the UI.
 
-Both features are additive — the original dropdown-based flow still works
-exactly as before, with or without an Anthropic key.
+Both features are the ONLY flow now — the earlier dropdown-based rule-based
+flow has been removed entirely. This is a single-path, AI-only app.
 
 ## 1. Google Cloud setup (one-time)
 
@@ -57,10 +57,9 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Opens at `http://localhost:8501`. Type a request in plain language and
-click "Let AI figure it out" to use the GenAI + Agentic flow, or scroll
-down and use the dropdowns for the original rule-based flow — both work
-independently.
+Opens at `http://localhost:8501`. Type a request in plain language, set your
+budget/open-now preferences, and click "Find restaurants" — both API keys
+are required, there's no dropdown fallback anymore.
 
 ## What's inside
 

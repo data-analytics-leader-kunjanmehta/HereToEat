@@ -57,20 +57,29 @@ def _parse_json_response(raw: str) -> dict:
 # GENAI USE CASE: free-text query understanding
 # ---------------------------------------------------------------------------
 EXTRACTION_SYSTEM = """You convert a free-text restaurant request into structured JSON \
-for a restaurant search app. Read what the person wrote and infer the closest matching \
-values below - use your judgement for implied meaning, not just keyword matching.
+for a restaurant search app. Read what the person wrote and capture it in your own words - \
+do not force it into a fixed category if nothing fits well. Use your judgement for implied \
+meaning, not just keyword matching.
 
 Return ONLY valid JSON, no other text, no markdown fences, matching exactly this shape:
 {
-  "mood": one of ["Any","Romantic","Casual","Celebratory","Cozy / Quiet","Lively / Energetic"],
-  "occasion": one of ["Any","Casual meal","Date","Birthday / Celebration","Family gathering","Business meal","Anniversary"],
-  "group": one of ["Any","Solo","Couple / Date","Friends","Family","Large group"],
+  "mood": a short free-text phrase capturing the person's mood or emotional state, in your \
+own words (e.g. "wanting quiet solitude", "celebratory", "processing a breakup"), or "Any" \
+if nothing is expressed,
+  "occasion": a short free-text phrase for the occasion or purpose, in your own words \
+(e.g. "a first date", "comfort after a bad day", "a business lunch"), or "Any" if nothing \
+is expressed,
+  "group": a short free-text phrase describing who's going, in your own words \
+(e.g. "solo", "a couple", "a big family group"), or "Any" if nothing is expressed,
   "cuisine_pref": array of cuisine name strings explicitly or clearly implied, else [],
-  "max_price": integer 1-3 (1=budget conscious, 3=no limit mentioned), default 3 if not mentioned,
-  "open_now_only": boolean, true only if urgency is implied ("right now","tonight","currently open"), else false,
+  "max_price": integer 1-3 (1=budget conscious, 3=no limit mentioned), default 3 if not \
+mentioned - this MUST stay a plain number, it is used for real price filtering downstream,
+  "open_now_only": boolean, true only if urgency is implied ("right now","tonight","currently \
+open"), else false - this MUST stay true/false, it is used for a real open-status filter,
   "area": area/neighborhood mentioned as plain text, else null,
-  "keywords": array of SPECIFIC requirements or amenities mentioned that don't fit the fields above \
-(e.g. "big screen tv", "live sports", "outdoor seating", "pet friendly", "rooftop", "parking"), else []
+  "keywords": array of SPECIFIC requirements or amenities mentioned that don't fit the fields \
+above (e.g. "big screen tv", "live sports", "outdoor seating", "pet friendly", "rooftop", \
+"parking"), else []
 }"""
 
 
@@ -206,8 +215,8 @@ def agentic_search(area: str, cuisine_pref: list[str], ctx: dict,
     local_ctx = dict(ctx)
     keywords = keywords or []
     cuisine_str = f"{' '.join(cuisine_pref)} " if cuisine_pref else ""
-    mood_str = f"{mood} " if mood and mood != "Any" else ""
-    occasion_str = f" for {occasion}" if occasion and occasion != "Any" else ""
+    mood_str = f"{mood} " if mood and mood.strip().lower() != "any" else ""
+    occasion_str = f" for {occasion}" if occasion and occasion.strip().lower() != "any" else ""
     keywords_str = f" with {', '.join(keywords)}" if keywords else ""
     query = f"{mood_str}{cuisine_str}restaurants near {area}{occasion_str}{keywords_str}".strip()
     trace.append(f'Searching Google Places for: "{query}"')

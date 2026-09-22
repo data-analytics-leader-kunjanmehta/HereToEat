@@ -86,6 +86,7 @@ def main():
     st.markdown("##### Describe what you're looking for")
     free_text = st.text_area(
         "Free text",
+        key="free_text_input",
         placeholder="e.g. \"Somewhere quiet in Indiranagar for a work call over coffee\"",
         label_visibility="collapsed",
         height=100,
@@ -98,33 +99,53 @@ def main():
     with col2:
         open_now_only = st.checkbox("Open right now only", value=False)
 
-    ask_ai_clicked = st.button(
-        "\U0001F916 Find restaurants",
+    if "extracted" not in st.session_state:
+        st.session_state.extracted = None
+
+    understand_clicked = st.button(
+        "\U0001F916 Understand my request",
         type="primary",
         disabled=not (google_key_present and llm_key_present),
     )
 
-    if ask_ai_clicked and free_text.strip():
-        with st.spinner("Reading your request..."):
-            try:
-                parsed = llm_agent.extract_context_from_text(free_text)
-            except Exception as e:
-                st.error(f"Couldn't understand that with AI: {e}")
-                parsed = None
+    if understand_clicked:
+        if not free_text.strip():
+            st.warning("Type something in the box above first.")
+        else:
+            with st.spinner("Reading your request..."):
+                try:
+                    st.session_state.extracted = llm_agent.extract_context_from_text(free_text)
+                except Exception as e:
+                    st.error(f"Couldn't understand that with AI: {e}")
+                    st.session_state.extracted = None
 
-        if parsed:
-            with st.expander("What the AI understood from your text", expanded=True):
-                st.json(parsed)
+    # -----------------------------------------------------------------
+    # HUMAN-IN-THE-LOOP CONFIRMATION - kept deliberately simple: one
+    # natural-language paraphrase, one yes/no. No structured fields shown,
+    # so nothing about the confirmation step implies a fixed taxonomy for
+    # mood/occasion/group - those stay genuinely open-ended underneath.
+    # If the paraphrase is wrong, the fix is to rephrase the original
+    # sentence, not to edit a form.
+    # -----------------------------------------------------------------
+    if st.session_state.extracted:
+        parsed = st.session_state.extracted
+        st.markdown("---")
+        st.info(f"\U0001F4AC {parsed.get('summary', 'Could not summarize the request.')}")
+        st.caption("Is that right?")
 
+        col_yes, col_no = st.columns(2)
+        with col_yes:
+            confirm_clicked = st.button("\u2705 Yes, search for that", type="primary")
+        with col_no:
+            if st.button("\u270f\ufe0f No, let me rephrase"):
+                st.session_state.extracted = None
+                st.rerun()
+
+        if confirm_clicked:
             area = parsed.get("area") or "Bangalore"
             cuisine_pref = parsed.get("cuisine_pref") or []
-            # Free-text max_price/open_now_only from the UI controls above take
-            # precedence if the person set them; otherwise fall back to whatever
-            # the AI inferred from the text itself.
-            ctx = build_context(
-                max_price if max_price != 3 else parsed.get("max_price", 3),
-                open_now_only or parsed.get("open_now_only", False),
-            )
+            keywords = parsed.get("keywords") or []
+            ctx = build_context(max_price, open_now_only)
 
             with st.spinner("Searching and refining..."):
                 results, trace = llm_agent.agentic_search(
@@ -132,7 +153,7 @@ def main():
                     mood=parsed.get("mood", "Any"),
                     occasion=parsed.get("occasion", "Any"),
                     group=parsed.get("group", "Any"),
-                    keywords=parsed.get("keywords", []),
+                    keywords=keywords,
                 )
 
             st.markdown("---")
@@ -144,8 +165,6 @@ def main():
                 st.markdown(f"##### Top {min(5, len(results))} matches")
                 for i, r in enumerate(results[:5], start=1):
                     render_result_card(r, i)
-    elif ask_ai_clicked:
-        st.warning("Type something in the box above first.")
 
 
 if __name__ == "__main__":

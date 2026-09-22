@@ -61,6 +61,15 @@ for a restaurant search app. Read what the person wrote and capture it in your o
 do not force it into a fixed category if nothing fits well. Use your judgement for implied \
 meaning, not just keyword matching.
 
+CRITICAL RULE ON CONFLICTING SIGNALS: a message can mention other people (a friend, a partner, \
+a family member) as BACKGROUND to why the person feels a certain way, while explicitly stating \
+a DIFFERENT plan for who is actually going. When this happens, the person's explicit, direct \
+statement of their plan always wins over an incidental mention - never assume someone \
+mentioned in passing is joining unless the person actually says so.
+Example: "I had a huge fight with my sister and I just want to eat alone tonight" -> \
+the sister is NOT going. group: "solo". Do not output "with sister" or "two people" here - \
+that would be ignoring their explicit statement in favor of an incidental mention.
+
 Return ONLY valid JSON, no other text, no markdown fences, matching exactly this shape:
 {
   "mood": a short free-text phrase capturing the person's mood or emotional state, in your \
@@ -69,8 +78,9 @@ if nothing is expressed,
   "occasion": a short free-text phrase for the occasion or purpose, in your own words \
 (e.g. "a first date", "comfort after a bad day", "a business lunch"), or "Any" if nothing \
 is expressed,
-  "group": a short free-text phrase describing who's going, in your own words \
-(e.g. "solo", "a couple", "a big family group"), or "Any" if nothing is expressed,
+  "group": a short free-text phrase describing who is ACTUALLY going, in your own words \
+(e.g. "solo", "a couple", "a big family group") - apply the CRITICAL RULE above if the \
+message mentions other people ambiguously, or "Any" if nothing is expressed,
   "cuisine_pref": array of cuisine name strings explicitly or clearly implied, else [],
   "max_price": integer 1-3 (1=budget conscious, 3=no limit mentioned), default 3 if not \
 mentioned - this MUST stay a plain number, it is used for real price filtering downstream,
@@ -79,7 +89,12 @@ open"), else false - this MUST stay true/false, it is used for a real open-statu
   "area": area/neighborhood mentioned as plain text, else null,
   "keywords": array of SPECIFIC requirements or amenities mentioned that don't fit the fields \
 above (e.g. "big screen tv", "live sports", "outdoor seating", "pet friendly", "rooftop", \
-"parking"), else []
+"parking"), else [],
+  "summary": ONE natural, warm sentence in plain conversational English paraphrasing your \
+understanding of what they want and why - written for the person to read and confirm, not a \
+list of field values. Reflect the genuine nuance of what they wrote, including their emotional \
+state if relevant. This is the single most important field - it is the ONLY thing the person \
+sees before deciding whether your understanding is correct.
 }"""
 
 

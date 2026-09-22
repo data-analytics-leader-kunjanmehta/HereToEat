@@ -57,9 +57,12 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Opens at `http://localhost:8501`. Type a request in plain language, set your
-budget/open-now preferences, and click "Find restaurants" — both API keys
-are required, there's no dropdown fallback anymore.
+Opens at `http://localhost:8501`. Type a request in plain language, click
+"Understand my request" — the AI writes back a single plain-English
+paraphrase of what it thinks you want (not a form, no fixed categories for
+mood/occasion/group). Click "Yes, search for that" if it's right, or "No,
+let me rephrase" to edit your original sentence directly. Both API keys
+are required.
 
 ## What's inside
 
@@ -86,6 +89,6 @@ about it changed either.
 
 Both `llm_agent.py` functions were built and unit-tested against
 *simulated* Claude responses — this sandbox can't reach `api.anthropic.com`
-directly. Your first real click of "Let AI figure it out" is the actual
+directly. Your first real click of "Understand my request" is the actual
 first live test. If it errors, the message shown will say what's wrong —
 paste it back for a quick fix.

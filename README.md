@@ -17,6 +17,15 @@ missing, so it never just breaks.
   drop a filter, rephrase) and retries — up to 3 attempts — instead of
   just returning "no matches." Every step is shown in an "Agent Reasoning"
   panel in the UI.
+- **Real geocoding + midpoint search** (`google_places.geocode_place_name`,
+  `llm_agent.geographic_midpoint`, `resolve_search_center`): if a request
+  mentions two different areas (e.g. two people's home neighborhoods) and
+  wants something equidistant, both are geocoded and the actual geographic
+  midpoint is computed and used as the real search center — not just
+  whichever area happened to be mentioned first in the sentence.
+- **Exclusion handling** (`_hard_filter`'s `exclude_places`): if the request
+  names a specific place to avoid (e.g. "we've been to X plenty, suggest
+  something similar but different"), that place is filtered out of results.
 
 Both features are the ONLY flow now — the earlier dropdown-based rule-based
 flow has been removed entirely. This is a single-path, AI-only app.

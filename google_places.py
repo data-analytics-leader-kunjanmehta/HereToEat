@@ -116,3 +116,38 @@ def search_restaurants(query_text: str, api_key: str | None = None,
     data = resp.json()
     places = data.get("places", [])
     return [_normalize(p) for p in places]
+
+
+def geocode_place_name(name: str, api_key: str | None = None) -> tuple[float, float] | None:
+    """
+    Resolves a place/area name (e.g. "Sarjapur", "Hoskote") to approximate
+    coordinates - reusing the SAME Places API (New) already enabled for this
+    project, via a 1-result text search asking only for the location field.
+    No separate Geocoding API needs enabling, no new key needed.
+
+    Returns (latitude, longitude), or None if nothing was found.
+    Raises RuntimeError on an actual API failure (bad key, quota, etc.)
+    - a "not found" result returns None, that's a different, non-error case.
+    """
+    api_key = api_key or os.environ.get("GOOGLE_PLACES_API_KEY")
+    if not api_key:
+        raise RuntimeError("No Google Places API key found (set GOOGLE_PLACES_API_KEY in .env)")
+
+    body = {"textQuery": name, "maxResultCount": 1}
+    headers = {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": api_key,
+        "X-Goog-FieldMask": "places.location",
+    }
+    resp = requests.post(PLACES_URL, json=body, headers=headers, timeout=10)
+    if resp.status_code != 200:
+        raise RuntimeError(f"Geocoding lookup failed for '{name}' ({resp.status_code}): {resp.text[:200]}")
+
+    places = resp.json().get("places", [])
+    if not places:
+        return None
+    loc = places[0].get("location", {})
+    lat, lng = loc.get("latitude"), loc.get("longitude")
+    if lat is None or lng is None:
+        return None
+    return (lat, lng)

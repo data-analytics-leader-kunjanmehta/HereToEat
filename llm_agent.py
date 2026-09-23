@@ -26,6 +26,7 @@ like these rather than long-form generation.
 """
 
 import json
+import math
 import os
 
 import anthropic
@@ -56,6 +57,52 @@ def _parse_json_response(raw: str) -> dict:
 # ---------------------------------------------------------------------------
 # GENAI USE CASE: free-text query understanding
 # ---------------------------------------------------------------------------
+def geographic_midpoint(lat1: float, lng1: float, lat2: float, lng2: float) -> tuple[float, float]:
+    """
+    True spherical midpoint between two lat/lng points (not a naive average -
+    that distorts noticeably at the distances two areas in the same city can
+    be apart). Pure math, no API call, fully testable on its own.
+    """
+    lat1r, lng1r, lat2r, lng2r = map(math.radians, [lat1, lng1, lat2, lng2])
+    bx = math.cos(lat2r) * math.cos(lng2r - lng1r)
+    by = math.cos(lat2r) * math.sin(lng2r - lng1r)
+    lat3 = math.atan2(
+        math.sin(lat1r) + math.sin(lat2r),
+        math.sqrt((math.cos(lat1r) + bx) ** 2 + by ** 2),
+    )
+    lng3 = lng1r + math.atan2(by, math.cos(lat1r) + bx)
+    return (math.degrees(lat3), math.degrees(lng3))
+
+
+def resolve_search_center(locations: list[str]) -> tuple[float, float] | None:
+    """
+    Turns 1+ place names into a single search center:
+      - 0 locations:  returns None (caller falls back to the default city center)
+      - 1 location:   geocodes it directly
+      - 2+ locations: geocodes each, then returns the true midpoint of the
+                       first two (this is what makes an "equidistant between
+                       me and my friend" request actually work geographically,
+                       instead of just picking whichever area was mentioned
+                       first in the sentence)
+    Returns None (not an exception) if geocoding comes back empty - a real
+    API failure still raises, since that's a different, worse case.
+    """
+    if not locations:
+        return None
+
+    coords = []
+    for loc in locations[:2]:  # only need the first two for a real midpoint
+        result = google_places.geocode_place_name(loc)
+        if result:
+            coords.append(result)
+
+    if not coords:
+        return None
+    if len(coords) == 1:
+        return coords[0]
+    return geographic_midpoint(coords[0][0], coords[0][1], coords[1][0], coords[1][1])
+
+
 EXTRACTION_SYSTEM = """You convert a free-text restaurant request into structured JSON \
 for a restaurant search app. Read what the person wrote and capture it in your own words - \
 do not force it into a fixed category if nothing fits well. Use your judgement for implied \
@@ -86,7 +133,15 @@ message mentions other people ambiguously, or "Any" if nothing is expressed,
 mentioned - this MUST stay a plain number, it is used for real price filtering downstream,
   "open_now_only": boolean, true only if urgency is implied ("right now","tonight","currently \
 open"), else false - this MUST stay true/false, it is used for a real open-status filter,
-  "area": area/neighborhood mentioned as plain text, else null,
+  "locations": array of area/neighborhood/place names mentioned as plain text. If the person \
+wants something EQUIDISTANT, MIDWAY, or convenient for TWO+ people in different areas, include \
+ALL of those area names here (e.g. ["Sarjapur", "Hoskote"]) - this is what lets the app compute \
+a genuine midpoint, so capturing every location mentioned matters. If only one area is \
+mentioned, this has just that one entry. Empty array if no location at all is mentioned,
+  "exclude_places": array of SPECIFIC named venues the person explicitly does NOT want - e.g. \
+somewhere they've already been and want to avoid, or a place used only as a reference point \
+for what they're comparing against (e.g. "we've been to Gold Rush plenty, suggest something \
+similar but different" -> exclude_places: ["Gold Rush"]), else [],
   "keywords": array of SPECIFIC requirements or amenities mentioned that don't fit the fields \
 above (e.g. "big screen tv", "live sports", "outdoor seating", "pet friendly", "rooftop", \
 "parking"), else [],
@@ -147,26 +202,35 @@ def _decide_refinement(query: str, area: str, reason: str) -> dict:
     return _parse_json_response(resp.content[0].text)
 
 
-def _hard_filter(restaurants: list[dict], ctx: dict) -> list[dict]:
-    """Objective filters only (budget, open-now) - no tag-matching here at all,
-    since live Google data has no tags to match. This is intentionally dumb."""
+def _hard_filter(restaurants: list[dict], ctx: dict, exclude_places: list[str] = None) -> list[dict]:
+    """Objective filters only (budget, open-now, explicit exclusions) - no
+    tag-matching here at all, since live Google data has no tags to match.
+    Exclusion is a straightforward name check, deliberately not left to the
+    LLM alone to remember - this is the deterministic safety net."""
+    exclude_lower = [e.strip().lower() for e in (exclude_places or []) if e.strip()]
     out = []
     for r in restaurants:
         if ctx.get("open_now_only") and not r["open_now"]:
             continue
         if r["price_level"] > ctx.get("max_price", 3):
             continue
+        if any(ex in r["name"].lower() for ex in exclude_lower):
+            continue
         out.append(r)
     return out
 
 
-def llm_rerank(restaurants: list[dict], mood: str, occasion: str, group: str, keywords: list[str] = None) -> list[dict]:
+def llm_rerank(restaurants: list[dict], mood: str, occasion: str, group: str,
+               keywords: list[str] = None, exclude_places: list[str] = None) -> list[dict]:
     """
     The actual fix for live-data mood matching: ask an LLM to judge fit from
     real restaurant text (name/description/type), since there's no mood_tags
     field to pattern-match against on live Google results. keywords carries
     anything specific the person asked for that didn't fit mood/occasion/group
     (e.g. "big screen tv", "live sports") so the model can weigh it explicitly.
+    exclude_places is passed through too as a reminder, even though the hard
+    filter already removes exact name matches - this catches near-duplicates
+    the substring check might miss.
     """
     if not restaurants:
         return []
@@ -178,7 +242,12 @@ def llm_rerank(restaurants: list[dict], mood: str, occasion: str, group: str, ke
         for i, r in enumerate(restaurants)
     )
     keywords_line = f"Specific requirements: {', '.join(keywords)}\n" if keywords else ""
-    user_msg = f"Mood: {mood}\nOccasion: {occasion}\nGroup: {group}\n{keywords_line}\nCandidates:\n{listing}"
+    exclude_line = (
+        f"IMPORTANT: the person does NOT want anything that is actually {', '.join(exclude_places)} "
+        f"or a duplicate of it - they've already been there.\n"
+        if exclude_places else ""
+    )
+    user_msg = f"Mood: {mood}\nOccasion: {occasion}\nGroup: {group}\n{keywords_line}{exclude_line}\nCandidates:\n{listing}"
 
     resp = client.messages.create(
         model=MODEL,
@@ -207,21 +276,27 @@ def llm_rerank(restaurants: list[dict], mood: str, occasion: str, group: str, ke
     return reordered
 
 
-def agentic_search(area: str, cuisine_pref: list[str], ctx: dict,
+def agentic_search(locations: list[str], cuisine_pref: list[str], ctx: dict,
                     mood: str = "Any", occasion: str = "Any", group: str = "Any",
-                    keywords: list[str] = None, max_attempts: int = 3):
+                    keywords: list[str] = None, exclude_places: list[str] = None,
+                    max_attempts: int = 3):
     """
     Reason -> Act -> Observe loop over Google Places, followed by LLM re-ranking.
 
+    Step 0 (Act):      resolve 1+ location names into a real search center -
+                        geocodes each via Google, and if 2+ locations were
+                        given, computes the actual geographic midpoint. This
+                        is what makes "somewhere equidistant for both of us"
+                        genuinely work, instead of defaulting to a fixed city
+                        center or whichever area got mentioned first.
     Step A (Act):      search Google with a query that includes mood/occasion
-                        AND keywords (e.g. "big screen tv", "live sports") -
-                        anything specific the person asked for that doesn't
-                        fit the structured fields still reaches the search.
-    Step B (Observe):  apply objective hard filters only (budget, open-now).
+                        AND keywords - anything specific that doesn't fit the
+                        structured fields still reaches the search.
+    Step B (Observe):  apply objective hard filters (budget, open-now,
+                        excluded places).
     Step C (Reason):   if too few survive, ask the LLM how to adjust and retry.
     Step D (Reason):   once enough candidates exist, ask the LLM to judge and
-                        rank them by genuine fit, keywords included - this is
-                        what replaces the old empty-tag scoring for live data.
+                        rank them by genuine fit.
 
     Returns (results, trace) - trace is a list of plain-English steps for the
     "Agent Reasoning" panel in the UI.
@@ -229,23 +304,45 @@ def agentic_search(area: str, cuisine_pref: list[str], ctx: dict,
     trace = []
     local_ctx = dict(ctx)
     keywords = keywords or []
+    exclude_places = exclude_places or []
+    locations = locations or []
+
+    center = None
+    if locations:
+        try:
+            center = resolve_search_center(locations)
+            if center and len(locations) >= 2:
+                trace.append(f"Geocoded {' and '.join(locations[:2])}, computed the actual midpoint between them")
+            elif center:
+                trace.append(f"Geocoded '{locations[0]}' as the search center")
+            else:
+                trace.append(f"Couldn't geocode {', '.join(locations)} \u2014 using default city-wide search")
+        except Exception as e:
+            trace.append(f"Geocoding failed ({e}) \u2014 using default city-wide search")
+            center = None
+
+    location_str = " and ".join(locations) if locations else "Bangalore"
     cuisine_str = f"{' '.join(cuisine_pref)} " if cuisine_pref else ""
     mood_str = f"{mood} " if mood and mood.strip().lower() != "any" else ""
     occasion_str = f" for {occasion}" if occasion and occasion.strip().lower() != "any" else ""
     keywords_str = f" with {', '.join(keywords)}" if keywords else ""
-    query = f"{mood_str}{cuisine_str}restaurants near {area}{occasion_str}{keywords_str}".strip()
+    query = f"{mood_str}{cuisine_str}restaurants near {location_str}{occasion_str}{keywords_str}".strip()
     trace.append(f'Searching Google Places for: "{query}"')
+
+    search_kwargs = {"query_text": query}
+    if center:
+        search_kwargs["lat"], search_kwargs["lng"] = center
 
     filtered = []
     for attempt in range(1, max_attempts + 1):
         try:
-            restaurants = google_places.search_restaurants(query_text=query)
+            restaurants = google_places.search_restaurants(**search_kwargs)
         except Exception as e:
             trace.append(f"Search failed: {e}")
             return [], trace
 
-        filtered = _hard_filter(restaurants, local_ctx)
-        trace.append(f"Attempt {attempt}: {len(restaurants)} raw results \u2192 {len(filtered)} passed budget/open-now filters")
+        filtered = _hard_filter(restaurants, local_ctx, exclude_places)
+        trace.append(f"Attempt {attempt}: {len(restaurants)} raw results \u2192 {len(filtered)} passed budget/open-now/exclusion filters")
 
         if len(filtered) >= 3 or attempt == max_attempts:
             break
@@ -256,9 +353,9 @@ def agentic_search(area: str, cuisine_pref: list[str], ctx: dict,
             else "Too few results matched \u2014 query may be too narrow"
         )
         try:
-            refinement = _decide_refinement(query, area, reason)
+            refinement = _decide_refinement(query, location_str, reason)
             trace.append(f"Agent decision: {refinement['change']}")
-            query = refinement["new_query"]
+            search_kwargs["query_text"] = refinement["new_query"]
         except Exception as e:
             trace.append(f"Refinement call failed ({e}) \u2014 relaxing open-now filter as a fallback")
             local_ctx["open_now_only"] = False
@@ -269,7 +366,7 @@ def agentic_search(area: str, cuisine_pref: list[str], ctx: dict,
 
     trace.append(f"Asking the LLM to judge {len(filtered)} candidates for genuine mood/occasion fit")
     try:
-        ranked = llm_rerank(filtered, mood, occasion, group, keywords)
+        ranked = llm_rerank(filtered, mood, occasion, group, keywords, exclude_places)
         trace.append("LLM ranking complete")
     except Exception as e:
         trace.append(f"LLM ranking failed ({e}) \u2014 falling back to rating-sorted order")

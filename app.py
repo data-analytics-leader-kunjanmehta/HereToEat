@@ -142,18 +142,20 @@ def main():
                 st.rerun()
 
         if confirm_clicked:
-            area = parsed.get("area") or "Bangalore"
+            locations = parsed.get("locations") or ["Bangalore"]
             cuisine_pref = parsed.get("cuisine_pref") or []
             keywords = parsed.get("keywords") or []
+            exclude_places = parsed.get("exclude_places") or []
             ctx = build_context(max_price, open_now_only)
 
             with st.spinner("Searching and refining..."):
                 results, trace = llm_agent.agentic_search(
-                    area, cuisine_pref, ctx,
+                    locations, cuisine_pref, ctx,
                     mood=parsed.get("mood", "Any"),
                     occasion=parsed.get("occasion", "Any"),
                     group=parsed.get("group", "Any"),
                     keywords=keywords,
+                    exclude_places=exclude_places,
                 )
 
             st.markdown("---")

@@ -74,9 +74,10 @@ def geographic_midpoint(lat1: float, lng1: float, lat2: float, lng2: float) -> t
     return (math.degrees(lat3), math.degrees(lng3))
 
 
-def resolve_search_center(locations: list[str]) -> tuple[float, float] | None:
+def resolve_search_center(locations: list[str]) -> dict | None:
     """
-    Turns 1+ place names into a single search center:
+    Turns 1+ place names into a single search center, with full diagnostics
+    attached so a wrong result is traceable instead of a silent guess:
       - 0 locations:  returns None (caller falls back to the default city center)
       - 1 location:   geocodes it directly
       - 2+ locations: geocodes each, then returns the true midpoint of the
@@ -84,23 +85,34 @@ def resolve_search_center(locations: list[str]) -> tuple[float, float] | None:
                        me and my friend" request actually work geographically,
                        instead of just picking whichever area was mentioned
                        first in the sentence)
-    Returns None (not an exception) if geocoding comes back empty - a real
-    API failure still raises, since that's a different, worse case.
+
+    Returns {"lat": float, "lng": float, "resolved": [...], "failed": [...]},
+    or None if NOTHING could be geocoded at all. A real API failure still
+    raises - a "couldn't find that name" result returns partial/None instead.
     """
     if not locations:
         return None
 
-    coords = []
+    resolved = []
+    failed = []
     for loc in locations[:2]:  # only need the first two for a real midpoint
         result = google_places.geocode_place_name(loc)
         if result:
-            coords.append(result)
+            resolved.append({"input": loc, **result})
+        else:
+            failed.append(loc)
 
-    if not coords:
+    if not resolved:
         return None
-    if len(coords) == 1:
-        return coords[0]
-    return geographic_midpoint(coords[0][0], coords[0][1], coords[1][0], coords[1][1])
+
+    if len(resolved) == 1:
+        lat, lng = resolved[0]["lat"], resolved[0]["lng"]
+    else:
+        lat, lng = geographic_midpoint(
+            resolved[0]["lat"], resolved[0]["lng"], resolved[1]["lat"], resolved[1]["lng"]
+        )
+
+    return {"lat": lat, "lng": lng, "resolved": resolved, "failed": failed}
 
 
 EXTRACTION_SYSTEM = """You convert a free-text restaurant request into structured JSON \
@@ -307,19 +319,32 @@ def agentic_search(locations: list[str], cuisine_pref: list[str], ctx: dict,
     exclude_places = exclude_places or []
     locations = locations or []
 
-    center = None
+    center_result = None
     if locations:
         try:
-            center = resolve_search_center(locations)
-            if center and len(locations) >= 2:
-                trace.append(f"Geocoded {' and '.join(locations[:2])}, computed the actual midpoint between them")
-            elif center:
-                trace.append(f"Geocoded '{locations[0]}' as the search center")
+            center_result = resolve_search_center(locations)
+            if center_result:
+                for r in center_result["resolved"]:
+                    trace.append(
+                        f"Geocoded '{r['input']}' \u2192 matched \"{r['resolved_name']}\" "
+                        f"({r['resolved_address']}) at ({r['lat']:.4f}, {r['lng']:.4f})"
+                    )
+                for f in center_result["failed"]:
+                    trace.append(f"Could not geocode '{f}' \u2014 excluded from the midpoint calculation")
+                if len(center_result["resolved"]) >= 2:
+                    trace.append(
+                        f"Computed midpoint: ({center_result['lat']:.4f}, {center_result['lng']:.4f})"
+                    )
+                else:
+                    trace.append(
+                        f"Using single resolved location as center: "
+                        f"({center_result['lat']:.4f}, {center_result['lng']:.4f})"
+                    )
             else:
-                trace.append(f"Couldn't geocode {', '.join(locations)} \u2014 using default city-wide search")
+                trace.append(f"Couldn't geocode any of {', '.join(locations)} \u2014 using default city-wide search")
         except Exception as e:
             trace.append(f"Geocoding failed ({e}) \u2014 using default city-wide search")
-            center = None
+            center_result = None
 
     location_str = " and ".join(locations) if locations else "Bangalore"
     cuisine_str = f"{' '.join(cuisine_pref)} " if cuisine_pref else ""
@@ -330,8 +355,9 @@ def agentic_search(locations: list[str], cuisine_pref: list[str], ctx: dict,
     trace.append(f'Searching Google Places for: "{query}"')
 
     search_kwargs = {"query_text": query}
-    if center:
-        search_kwargs["lat"], search_kwargs["lng"] = center
+    if center_result:
+        search_kwargs["lat"], search_kwargs["lng"] = center_result["lat"], center_result["lng"]
+        trace.append(f"Search will be biased toward ({search_kwargs['lat']:.4f}, {search_kwargs['lng']:.4f}), not the default city center")
 
     filtered = []
     for attempt in range(1, max_attempts + 1):

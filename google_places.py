@@ -118,14 +118,21 @@ def search_restaurants(query_text: str, api_key: str | None = None,
     return [_normalize(p) for p in places]
 
 
-def geocode_place_name(name: str, api_key: str | None = None) -> tuple[float, float] | None:
+def geocode_place_name(name: str, api_key: str | None = None, city_hint: str = "Bangalore, India") -> dict | None:
     """
     Resolves a place/area name (e.g. "Sarjapur", "Hoskote") to approximate
     coordinates - reusing the SAME Places API (New) already enabled for this
     project, via a 1-result text search asking only for the location field.
     No separate Geocoding API needs enabling, no new key needed.
 
-    Returns (latitude, longitude), or None if nothing was found.
+    A bare locality name like "Sarjapur" is genuinely ambiguous to a places
+    search (there are similarly-named places elsewhere in India), so the
+    query is disambiguated with a city hint before sending it.
+
+    Returns {"lat": float, "lng": float, "resolved_name": str, "resolved_address": str},
+    or None if nothing was found. The resolved_name/address are returned
+    specifically so a caller can show what Google actually matched - this
+    is what makes a wrong match diagnosable instead of a silent guess.
     Raises RuntimeError on an actual API failure (bad key, quota, etc.)
     - a "not found" result returns None, that's a different, non-error case.
     """
@@ -133,21 +140,28 @@ def geocode_place_name(name: str, api_key: str | None = None) -> tuple[float, fl
     if not api_key:
         raise RuntimeError("No Google Places API key found (set GOOGLE_PLACES_API_KEY in .env)")
 
-    body = {"textQuery": name, "maxResultCount": 1}
+    query = name if city_hint.lower() in name.lower() else f"{name}, {city_hint}"
+    body = {"textQuery": query, "maxResultCount": 1}
     headers = {
         "Content-Type": "application/json",
         "X-Goog-Api-Key": api_key,
-        "X-Goog-FieldMask": "places.location",
+        "X-Goog-FieldMask": "places.location,places.displayName,places.formattedAddress",
     }
     resp = requests.post(PLACES_URL, json=body, headers=headers, timeout=10)
     if resp.status_code != 200:
-        raise RuntimeError(f"Geocoding lookup failed for '{name}' ({resp.status_code}): {resp.text[:200]}")
+        raise RuntimeError(f"Geocoding lookup failed for '{query}' ({resp.status_code}): {resp.text[:200]}")
 
     places = resp.json().get("places", [])
     if not places:
         return None
-    loc = places[0].get("location", {})
+    place = places[0]
+    loc = place.get("location", {})
     lat, lng = loc.get("latitude"), loc.get("longitude")
     if lat is None or lng is None:
         return None
-    return (lat, lng)
+    return {
+        "lat": lat,
+        "lng": lng,
+        "resolved_name": place.get("displayName", {}).get("text", name),
+        "resolved_address": place.get("formattedAddress", ""),
+    }

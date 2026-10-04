@@ -188,6 +188,11 @@ REFINE_SYSTEM = """You are refining a restaurant search that returned too few us
 Given the original search query, the area, and why it fell short, decide ONE concrete
 change to make and write a new search query text.
 
+CRITICAL: if told the geography is already enforced separately (a geo_lock note will say so),
+your new_query text must NOT contain any place/area/neighborhood name at all - not even the
+one given as "Area" context. Putting a place name in the query text can override the separate
+geographic restriction and break it. Only describe mood/cuisine/occasion/keywords in that case.
+
 Return ONLY valid JSON, no other text, no markdown fences:
 {"change": "one short sentence describing what you're relaxing and why", "new_query": "the new search text to run"}"""
 
@@ -203,15 +208,29 @@ candidate, ordered best-fit first, each item:
 Do not invent restaurants that aren't in the input list. Include all of them, just reordered."""
 
 
-def _decide_refinement(query: str, area: str, reason: str) -> dict:
+def _decide_refinement(query: str, area: str, reason: str, geo_locked: bool = False) -> dict:
     client = _client()
+    geo_note = (
+        "\ngeo_lock: TRUE - geography is enforced separately, do NOT include any place name in new_query."
+        if geo_locked else ""
+    )
     resp = client.messages.create(
         model=MODEL,
         max_tokens=200,
         system=REFINE_SYSTEM,
-        messages=[{"role": "user", "content": f"Original query: {query}\nArea: {area}\nProblem: {reason}"}],
+        messages=[{"role": "user", "content": f"Original query: {query}\nArea: {area}\nProblem: {reason}{geo_note}"}],
     )
-    return _parse_json_response(resp.content[0].text)
+    result = _parse_json_response(resp.content[0].text)
+    if geo_locked:
+        # Deterministic safety net - don't just trust the model followed the
+        # instruction. Strip any area words it may have slipped back in.
+        new_q = result.get("new_query", "")
+        for loc_word in area.replace(" and ", ",").split(","):
+            loc_word = loc_word.strip()
+            if loc_word:
+                new_q = new_q.replace(loc_word, "").strip()
+        result["new_query"] = " ".join(new_q.split()) or "restaurants"
+    return result
 
 
 def _hard_filter(restaurants: list[dict], ctx: dict, exclude_places: list[str] = None) -> list[dict]:
@@ -346,18 +365,39 @@ def agentic_search(locations: list[str], cuisine_pref: list[str], ctx: dict,
             trace.append(f"Geocoding failed ({e}) \u2014 using default city-wide search")
             center_result = None
 
-    location_str = " and ".join(locations) if locations else "Bangalore"
+    location_str = " and ".join(locations) if locations else "Bangalore"  # used in refinement reasoning below regardless of branch
     cuisine_str = f"{' '.join(cuisine_pref)} " if cuisine_pref else ""
     mood_str = f"{mood} " if mood and mood.strip().lower() != "any" else ""
     occasion_str = f" for {occasion}" if occasion and occasion.strip().lower() != "any" else ""
     keywords_str = f" with {', '.join(keywords)}" if keywords else ""
-    query = f"{mood_str}{cuisine_str}restaurants near {location_str}{occasion_str}{keywords_str}".strip()
+
+    if center_result:
+        # CRITICAL: do not put place names in the query text here. Google's
+        # own docs confirm locationBias can be silently overridden if the
+        # text contains an explicit place name - that's precisely what broke
+        # the midpoint before. With a real geocoded center, the geography is
+        # enforced by a hard locationRestriction box instead (set below) -
+        # the text only needs to describe mood/cuisine/occasion/keywords.
+        query = f"{mood_str}{cuisine_str}restaurants{occasion_str}{keywords_str}".strip()
+        if not query:
+            query = "restaurants"
+        trace.append("Left place names out of the search text on purpose \u2014 Google can override "
+                      "location bias when a place name appears in the query text itself")
+    else:
+        query = f"{mood_str}{cuisine_str}restaurants near {location_str}{occasion_str}{keywords_str}".strip()
+
     trace.append(f'Searching Google Places for: "{query}"')
 
     search_kwargs = {"query_text": query}
     if center_result:
-        search_kwargs["lat"], search_kwargs["lng"] = center_result["lat"], center_result["lng"]
-        trace.append(f"Search will be biased toward ({search_kwargs['lat']:.4f}, {search_kwargs['lng']:.4f}), not the default city center")
+        search_kwargs["lat"] = center_result["lat"]
+        search_kwargs["lng"] = center_result["lng"]
+        search_kwargs["strict_location"] = True
+        trace.append(
+            f"Using a HARD geographic restriction (not just a bias) around "
+            f"({search_kwargs['lat']:.4f}, {search_kwargs['lng']:.4f}) \u2014 results outside this "
+            f"box genuinely cannot be returned"
+        )
 
     filtered = []
     for attempt in range(1, max_attempts + 1):
@@ -379,7 +419,7 @@ def agentic_search(locations: list[str], cuisine_pref: list[str], ctx: dict,
             else "Too few results matched \u2014 query may be too narrow"
         )
         try:
-            refinement = _decide_refinement(query, location_str, reason)
+            refinement = _decide_refinement(query, location_str, reason, geo_locked=bool(center_result))
             trace.append(f"Agent decision: {refinement['change']}")
             search_kwargs["query_text"] = refinement["new_query"]
         except Exception as e:

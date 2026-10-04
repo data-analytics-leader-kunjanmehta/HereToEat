@@ -14,6 +14,7 @@ here and get combined with context at scoring time.
 Docs this follows: https://developers.google.com/maps/documentation/places/web-service/text-search
 """
 
+import math
 import os
 import requests
 
@@ -83,9 +84,18 @@ def _normalize(place: dict) -> dict:
 
 def search_restaurants(query_text: str, api_key: str | None = None,
                         lat: float = DEFAULT_LAT, lng: float = DEFAULT_LNG,
-                        radius_m: float = DEFAULT_RADIUS_M, max_results: int = 15) -> list[dict]:
+                        radius_m: float = DEFAULT_RADIUS_M, max_results: int = 15,
+                        strict_location: bool = False) -> list[dict]:
     """
     query_text: free-text search, e.g. "restaurants near Indiranagar, Bangalore"
+    strict_location: when True, uses locationRestriction (a hard geographic
+        boundary - Google's own docs: "no matches outside this area are
+        returned") instead of locationBias (a soft nudge that Google's docs
+        confirm can be OVERRIDDEN if the query text itself names an explicit
+        place - which defeats a computed midpoint if the caller left area
+        names in the search text). Text Search's locationRestriction only
+        accepts a rectangle, not a circle, so radius_m is converted to a
+        bounding box around (lat, lng) here.
     Returns a list of dicts in the same shape as data/sample_restaurants.json.
     Raises RuntimeError with a readable message on any API failure.
     """
@@ -93,16 +103,22 @@ def search_restaurants(query_text: str, api_key: str | None = None,
     if not api_key:
         raise RuntimeError("No Google Places API key found (set GOOGLE_PLACES_API_KEY in .env)")
 
-    body = {
-        "textQuery": query_text,
-        "maxResultCount": max_results,
-        "locationBias": {
-            "circle": {
-                "center": {"latitude": lat, "longitude": lng},
-                "radius": radius_m,
+    body = {"textQuery": query_text, "maxResultCount": max_results}
+
+    if strict_location:
+        lat_delta = radius_m / 111_320.0  # ~meters per degree latitude, roughly constant
+        lng_delta = radius_m / (111_320.0 * max(math.cos(math.radians(lat)), 0.01))
+        body["locationRestriction"] = {
+            "rectangle": {
+                "low": {"latitude": lat - lat_delta, "longitude": lng - lng_delta},
+                "high": {"latitude": lat + lat_delta, "longitude": lng + lng_delta},
             }
-        },
-    }
+        }
+    else:
+        body["locationBias"] = {
+            "circle": {"center": {"latitude": lat, "longitude": lng}, "radius": radius_m}
+        }
+
     headers = {
         "Content-Type": "application/json",
         "X-Goog-Api-Key": api_key,
